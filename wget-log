@@ -1,0 +1,6 @@
+--2024-06-16 17:54:48--  https://d.dropbox.com/api/4505546831036416/envelope/?sentry_key=015d5ce7dd3142cd8fca094a50adbf69
+Resolving d.dropbox.com (d.dropbox.com)... 162.125.8.20
+Connecting to d.dropbox.com (d.dropbox.com)|162.125.8.20|:443... connected.
+HTTP request sent, awaiting response... 405 Method Not Allowed
+2024-06-16 17:54:49 ERROR 405: Method Not Allowed.
+

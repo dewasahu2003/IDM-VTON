@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Literal
 from ip_adapter.ip_adapter import Resampler
 
 import argparse
-import logging
 import os
 import torch.utils.data as data
 import torchvision
@@ -50,7 +49,9 @@ logger = get_logger(__name__, log_level="INFO")
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument("--pretrained_model_name_or_path",type=str,default= "yisol/IDM-VTON",required=False,)
-    parser.add_argument("--width",type=int,default=768,)
+    parser.add_argument("--width",type=int,default=768,),
+    parser.add_argument("--epochs",type=int,default=4),
+    parser.add_argument("--learning_rate",default=0.02,type=float)
     parser.add_argument("--height",type=int,default=1024,)
     parser.add_argument("--num_inference_steps",type=int,default=30,)
     parser.add_argument("--output_dir",type=str,default="result",)
@@ -72,7 +73,7 @@ def pil_to_tensor(images):
     return images
 
 
-class VitonHDTestDataset(data.Dataset):
+class VitonHDTrainDataset(data.Dataset):
     def __init__(
         self,
         phase: Literal["train", "test"],
@@ -80,7 +81,7 @@ class VitonHDTestDataset(data.Dataset):
         order: Literal["paired", "unpaired"] = "paired",
         size: Tuple[int, int] = (512, 384),
     ):
-        super(VitonHDTestDataset, self).__init__()
+        super(VitonHDTrainDataset, self).__init__()
         self.dataroot = dataroot_path
         self.phase = phase
         self.height = size[0]
@@ -220,45 +221,39 @@ def main():
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-    weight_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    # if accelerator.mixed_precision == "fp16":
-    #     weight_dtype = torch.float16
-    #     args.mixed_precision = accelerator.mixed_precision
-    # elif accelerator.mixed_precision == "bf16":
-    #     weight_dtype = torch.bfloat16
-    #     args.mixed_precision = accelerator.mixed_precision
+    weight_dtype = torch.float16
 
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float16,
     )
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="unet",
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float16,
     )
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="image_encoder",
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float16,
     )
     UNet_Encoder = UNet2DConditionModel_ref.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="unet_encoder",
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float16,
     )
     text_encoder_one = CLIPTextModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="text_encoder",
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float16,
     )
     text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="text_encoder_2",
-        torch_dtype=weight_dtype,
+        torch_dtype=torch.float16,
     )
     tokenizer_one = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -275,14 +270,14 @@ def main():
 
 
     # Freeze vae and text_encoder and set unet to trainable
-    unet.requires_grad_(False)
+    unet.requires_grad_(True) 
     vae.requires_grad_(False)
     image_encoder.requires_grad_(False)
     UNet_Encoder.requires_grad_(False)
     text_encoder_one.requires_grad_(False)
     text_encoder_two.requires_grad_(False)
     UNet_Encoder.to(accelerator.device, weight_dtype)
-    unet.eval()
+    unet.train()
     UNet_Encoder.eval()
 
     
@@ -300,126 +295,119 @@ def main():
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
-    test_dataset = VitonHDTestDataset(
+    train_dataset = VitonHDTrainDataset(
         dataroot_path=args.data_dir,
-        phase="test",
+        phase="train",
         order="unpaired" if args.unpaired else "paired",
         size=(args.height, args.width),
     )
-    test_dataloader = torch.utils.data.DataLoader(
-        test_dataset,
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
         shuffle=False,
         batch_size=args.test_batch_size,
-        num_workers=1,
+        num_workers=4,
     )
-
+    optimizer = torch.optim.Adam(unet.parameters(), lr=args.learning_rate)
+    criterion = torch.nn.MSELoss()
     pipe = TryonPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=unet,
-            vae=vae,
-            feature_extractor= CLIPImageProcessor(),
-            text_encoder = text_encoder_one,
-            text_encoder_2 = text_encoder_two,
-            tokenizer = tokenizer_one,
-            tokenizer_2 = tokenizer_two,
-            scheduler = noise_scheduler,
-            image_encoder=image_encoder,
-            torch_dtype=torch.float16,
-    ).to(accelerator.device)
+        args.pretrained_model_name_or_path,
+        unet=unet,
+        vae=vae,
+        feature_extractor= CLIPImageProcessor(),
+        text_encoder = text_encoder_one,
+        text_encoder_2 = text_encoder_two,
+        tokenizer = tokenizer_one,
+        tokenizer_2 = tokenizer_two,
+        scheduler = noise_scheduler,
+        image_encoder=image_encoder,
+        torch_dtype=torch.float16).to(accelerator.device)
     pipe.unet_encoder = UNet_Encoder
 
-    # pipe.enable_sequential_cpu_offload()
-    # pipe.enable_model_cpu_offload()
-    # pipe.enable_vae_slicing()
+    # Training Loop
+    for epoch in range(args.epochs):
+        unet.train()
+        for sample in train_dataloader:
+            optimizer.zero_grad()
 
+            img_emb_list = []
+            for i in range(sample['cloth'].shape[0]):
+                img_emb_list.append(sample['cloth'][i])
 
+            prompt = sample["caption"]
 
-    with torch.no_grad():
-        # Extract the images
-        with torch.cuda.amp.autocast():
-            with torch.no_grad():
-                for sample in test_dataloader:
-                    img_emb_list = []
-                    for i in range(sample['cloth'].shape[0]):
-                        img_emb_list.append(sample['cloth'][i])
-                    
-                    prompt = sample["caption"]
+            num_prompts = sample['cloth'].shape[0]
+            negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
 
-                    num_prompts = sample['cloth'].shape[0]                                        
-                    negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+            if not isinstance(prompt, List):
+                prompt = [prompt] * num_prompts
+            if not isinstance(negative_prompt, List):
+                negative_prompt = [negative_prompt] * num_prompts
 
-                    if not isinstance(prompt, List):
-                        prompt = [prompt] * num_prompts
-                    if not isinstance(negative_prompt, List):
-                        negative_prompt = [negative_prompt] * num_prompts
+            image_embeds = torch.cat(img_emb_list,dim=0)
 
-                    image_embeds = torch.cat(img_emb_list,dim=0)
+            (
+                prompt_embeds,
+                negative_prompt_embeds,
+                pooled_prompt_embeds,
+                negative_pooled_prompt_embeds,
+            ) = pipe.encode_prompt(
+                prompt,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=True,
+                negative_prompt=negative_prompt,
+            )
 
-                    with torch.inference_mode():
-                        (
-                            prompt_embeds,
-                            negative_prompt_embeds,
-                            pooled_prompt_embeds,
-                            negative_pooled_prompt_embeds,
-                        ) = pipe.encode_prompt(
-                            prompt,
-                            num_images_per_prompt=1,
-                            do_classifier_free_guidance=True,
-                            negative_prompt=negative_prompt,
-                        )
-                    
-                    
-                        prompt = sample["caption_cloth"]
-                        negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
+            prompt = sample["caption_cloth"]
+            negative_prompt = "monochrome, lowres, bad anatomy, worst quality, low quality"
 
-                        if not isinstance(prompt, List):
-                            prompt = [prompt] * num_prompts
-                        if not isinstance(negative_prompt, List):
-                            negative_prompt = [negative_prompt] * num_prompts
+            if not isinstance(prompt, List):
+                prompt = [prompt] * num_prompts
+            if not isinstance(negative_prompt, List):
+                negative_prompt = [negative_prompt] * num_prompts
 
+            (
+                prompt_embeds_c,
+                _,
+                _,
+                _,
+            ) = pipe.encode_prompt(
+                prompt,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=False,
+                negative_prompt=negative_prompt,
+            )
 
-                        with torch.inference_mode():
-                            (
-                                prompt_embeds_c,
-                                _,
-                                _,
-                                _,
-                            ) = pipe.encode_prompt(
-                                prompt,
-                                num_images_per_prompt=1,
-                                do_classifier_free_guidance=False,
-                                negative_prompt=negative_prompt,
-                            )
-                        
+            generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
+            images = pipe(
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                num_inference_steps=args.num_inference_steps,
+                generator=generator,
+                strength=1.0,
+                pose_img=sample['pose_img'],
+                text_embeds_cloth=prompt_embeds_c,
+                cloth=sample["cloth_pure"].to(accelerator.device),
+                mask_image=sample['inpaint_mask'],
+                image=(sample['image']+1.0)/2.0,
+                height=args.height,
+                width=args.width,
+                guidance_scale=args.guidance_scale,
+                ip_adapter_image=image_embeds,
+            )[0]
 
+            # Calculate loss and perform backpropagation
+            loss = criterion(images, sample['image'].to(accelerator.device))
+            accelerator.backward(loss)
+            optimizer.step()
 
-                        generator = torch.Generator(pipe.device).manual_seed(args.seed) if args.seed is not None else None
-                        images = pipe(
-                            prompt_embeds=prompt_embeds,
-                            negative_prompt_embeds=negative_prompt_embeds,
-                            pooled_prompt_embeds=pooled_prompt_embeds,
-                            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                            num_inference_steps=args.num_inference_steps,
-                            generator=generator,
-                            strength = 1.0,
-                            pose_img = sample['pose_img'],
-                            text_embeds_cloth=prompt_embeds_c,
-                            cloth = sample["cloth_pure"].to(accelerator.device),
-                            mask_image=sample['inpaint_mask'],
-                            image=(sample['image']+1.0)/2.0, 
-                            height=args.height,
-                            width=args.width,
-                            guidance_scale=args.guidance_scale,
-                            ip_adapter_image = image_embeds,
-                        )[0]
+        # Log training information
+        logger.info(f"Epoch [{epoch+1}/{args.epochs}], Loss: {loss.item()}")
 
-
-                    for i in range(len(images)):
-                        x_sample = pil_to_tensor(images[i])
-                        torchvision.utils.save_image(x_sample,os.path.join(args.output_dir,sample['im_name'][i]))
-                
-
-
+    # Save the model
+    if accelerator.is_main_process:
+        torch.save(unet.state_dict(), os.path.join(args.output_dir, "unet_model.pth"))
 
 if __name__ == "__main__":
     main()

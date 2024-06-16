@@ -76,7 +76,7 @@ def parse_args():
     parser.add_argument("--output_dir",type=str,default="result",)
     parser.add_argument("--category",type=str,default="upper_body",choices=["upper_body", "lower_body", "dresses"])
     parser.add_argument("--unpaired",action="store_true",)
-    parser.add_argument("--data_dir",type=str,default="/home/omnious/workspace/yisol/Dataset/zalando")
+    parser.add_argument("--data_dir",type=str,default="/workspaces/IDM-VTON/test")
     parser.add_argument("--seed", type=int, default=42,)
     parser.add_argument("--test_batch_size", type=int, default=2,)
     parser.add_argument("--guidance_scale",type=float,default=2.0,)
