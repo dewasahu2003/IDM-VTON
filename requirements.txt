@@ -16,3 +16,4 @@ basicsr
 av
 onnxruntime==1.16.2
 opencv-python
+deepspeed
