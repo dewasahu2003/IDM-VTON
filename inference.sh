@@ -2,14 +2,14 @@
 ##paired setting
 accelerate launch --num_processes 2 inference.py --pretrained_model_name_or_path "yisol/IDM-VTON" \
     --width 768 --height 1024 --num_inference_steps 30 \
-    --output_dir "result" --data_dir "zalando-hd-resized" \
+    --output_dir "result" --data_dir "IDM-VTON/zalando-hd-resized" \
     --seed 42 --test_batch_size 2 --guidance_scale 2.0
 
 
 ##unpaired setting
 accelerate launch --num_processes 2 inference.py --pretrained_model_name_or_path "yisol/IDM-VTON" \
     --width 768 --height 1024 --num_inference_steps 30 \
-    --output_dir "result" --unpaired --data_dir "zalando-hd-resized" \
+    --output_dir "result" --unpaired --data_dir "IDM-VTON/zalando-hd-resized" \
     --seed 42 --test_batch_size 2 --guidance_scale 2.0
 
 
